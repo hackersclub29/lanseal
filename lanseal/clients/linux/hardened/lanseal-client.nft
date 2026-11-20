@@ -1,0 +1,57 @@
+#!/usr/sbin/nft -f
+# LANSeal Linux Client - Hardened Firewall
+# Static rules: physical LAN blocked by default, only allowed under IPsec transform
+
+flush ruleset
+
+table inet lanseal_client {
+    chain output {
+        type filter hook output priority filter - 10; policy accept;
+
+        # 1. IKE/ESP to gateway (NEVER encrypted - must allow raw)
+        ip daddr 10.24.10.235 udp dport { 500, 4500 } accept
+        ip daddr 10.24.10.235 ip protocol esp accept
+
+        # 2. DHCP (physical interface)
+        udp sport 68 udp dport 67 accept
+
+        # 3. DNS to gateway (if gateway runs DNS)
+        ip daddr 10.24.10.235 udp dport 53 accept
+        ip daddr 10.24.10.235 tcp dport 53 accept
+
+        # 4. Tunnel UP: traffic to LANSeal subnet has IPsec transform
+        ip daddr 10.77.0.0/24 rt ipsec exists accept
+        # Tunnel DOWN: no transform → drop (NO fallback)
+        ip daddr 10.77.0.0/24 drop
+
+        # 5. Tunnel UP: traffic to physical LAN has IPsec transform
+        ip daddr 10.24.10.0/24 rt ipsec exists accept
+        # Tunnel DOWN: no transform → drop (NO fallback)
+        ip daddr 10.24.10.0/24 drop
+
+        # 6. Internet (split tunnel) - policy accept allows
+    }
+
+    chain input {
+        type filter hook input priority filter - 10; policy accept;
+
+        # 1. IKE/ESP from gateway
+        ip saddr 10.24.10.235 udp sport { 500, 4500 } accept
+        ip saddr 10.24.10.235 ip protocol esp accept
+
+        # 2. DHCP reply
+        udp sport 67 udp dport 68 accept
+
+        # 3. DNS from gateway
+        ip saddr 10.24.10.235 udp sport 53 accept
+        ip saddr 10.24.10.235 tcp sport 53 accept
+
+        # 4. Only decrypted traffic from LANSeal subnet
+        ip saddr 10.77.0.0/24 meta ipsec exists accept
+        ip saddr 10.77.0.0/24 drop
+
+        # 5. Only decrypted traffic from physical LAN
+        ip saddr 10.24.10.0/24 meta ipsec exists accept
+        ip saddr 10.24.10.0/24 drop
+    }
+}

@@ -1,0 +1,55 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "LANSeal config (editor aid; server/lib/validate.py is the enforcing validator)",
+  "type": "object",
+  "required": ["version", "server", "network", "dns", "pki", "ipsec", "firewall"],
+  "properties": {
+    "version": {"const": 1},
+    "server": {
+      "type": "object",
+      "required": ["lan_interface", "lan_address", "dns_name", "admin_tcp_ports_lan"],
+      "properties": {
+        "lan_interface": {"type": "string", "pattern": "^[A-Za-z0-9_.:-]{1,15}$"},
+        "lan_address": {"type": "string", "format": "ipv4"},
+        "dns_name": {"type": "string"},
+        "admin_tcp_ports_lan": {"type": "array", "minItems": 1, "items": {"type": "integer", "minimum": 1, "maximum": 65535}}
+      }
+    },
+    "network": {
+      "type": "object",
+      "required": ["protected_subnets", "overlay_subnet", "gateway_overlay_address", "device_pool_start"],
+      "properties": {
+        "protected_subnets": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+        "overlay_subnet": {"type": "string"},
+        "gateway_overlay_address": {"type": "string", "format": "ipv4"},
+        "device_pool_start": {"type": "string", "format": "ipv4"}
+      }
+    },
+    "dns": {"type": "object", "required": ["domain"], "properties": {"domain": {"type": "string"}}},
+    "pki": {
+      "type": "object",
+      "required": ["ca_name", "ca_port", "key_type", "key_size", "device_cert_lifetime", "gateway_cert_lifetime", "enrollment_token_ttl"],
+      "properties": {
+        "ca_name": {"type": "string", "minLength": 3},
+        "ca_port": {"type": "integer", "minimum": 1, "maximum": 65535},
+        "key_type": {"enum": ["RSA", "EC"]},
+        "key_size": {"type": "integer"},
+        "device_cert_lifetime": {"type": "string", "pattern": "^[0-9]+h$"},
+        "gateway_cert_lifetime": {"type": "string", "pattern": "^[0-9]+h$"},
+        "enrollment_token_ttl": {"type": "string", "pattern": "^[0-9]+[mh]$"}
+      }
+    },
+    "ipsec": {
+      "type": "object",
+      "required": ["ike_proposals", "esp_proposals", "ike_rekey_time", "child_rekey_time", "dpd_delay"],
+      "properties": {
+        "ike_proposals": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+        "esp_proposals": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+        "ike_rekey_time": {"type": "string"},
+        "child_rekey_time": {"type": "string"},
+        "dpd_delay": {"type": "string"}
+      }
+    },
+    "firewall": {"type": "object", "required": ["fail_closed"], "properties": {"fail_closed": {"const": true}}}
+  }
+}

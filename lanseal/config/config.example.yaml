@@ -1,0 +1,45 @@
+# LANSeal configuration (example). The wizard (server/configure.sh) writes a
+# real copy to /etc/lanseal/config.yaml after you confirm discovered values.
+# Addresses below are RFC 5737 / documentation placeholders, NOT defaults.
+version: 1
+
+server:
+  lan_interface: eth0            # physical NIC that faces the LAN/Wi-Fi
+  lan_address: 192.0.2.10        # gateway address on the physical LAN
+  dns_name: gw.lanseal.home.arpa # SAN in the gateway certificate and the IKE identity
+  admin_tcp_ports_lan: [22]      # TCP ports kept open to the LAN on the gateway (SSH)
+
+network:
+  protected_subnets: [192.0.2.0/24]  # physical LAN prefix(es) whose peers must only be reached through the tunnel
+  overlay_subnet: 10.77.0.0/24       # VPN overlay; must not overlap any local route/address
+  gateway_overlay_address: 10.77.0.1
+  device_pool_start: 10.77.0.16      # first address handed to enrolled devices (static, one per device)
+
+dns:
+  domain: lanseal.home.arpa          # device names resolve as <name>.<domain> -> overlay address
+
+pki:
+  ca_name: LANSeal Private CA
+  ca_port: 9000
+  key_type: RSA                      # RSA is the interoperable choice for Windows IKEv2; EC untested there
+  key_size: 3072
+  device_cert_lifetime: 720h         # 30 days; renewal runs at 2/3 of lifetime
+  gateway_cert_lifetime: 2160h       # 90 days
+  enrollment_token_ttl: 60m
+
+ipsec:
+  # Strongest first. Weak algorithms (DES/3DES/MD5/SHA1/MODP<2048/NULL) are rejected by validation.
+  ike_proposals:
+    - aes256gcm16-prfsha384-ecp384
+    - aes256-sha384-ecp384
+    - aes256-sha256-modp2048
+  esp_proposals:                     # a DH group in each entry == Perfect Forward Secrecy
+    - aes256gcm16-ecp384
+    - aes256-sha384-ecp384
+    - aes256-sha256-modp2048
+  ike_rekey_time: 4h
+  child_rekey_time: 1h
+  dpd_delay: 30s
+
+firewall:
+  fail_closed: true

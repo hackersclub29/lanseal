@@ -1,0 +1,21 @@
+# LANSeal Client - Explicit routes with virtual IP as source
+# Ensures packets to 10.24.10.0/24 use 10.77.0.x source → match xfrm policy
+
+[Match]
+Name=eth0
+
+[Route]
+# Physical LAN via tunnel when UP
+Destination=10.24.10.0/24
+Table=220
+Source=10.77.0.16
+Type=unreachable
+Metric=4000
+
+[Route]
+# LANSeal subnet via tunnel
+Destination=10.77.0.0/24
+Table=220
+Source=10.77.0.16
+Type=unreachable
+Metric=4000

@@ -1,0 +1,28 @@
+# LANSeal gateway firewall (IPv4). Own table only; other tables are untouched.
+# Placeholders @...@ are substituted by install.sh. No NAT anywhere: overlay<->overlay is routed, not masqueraded.
+add table ip lanseal_gw
+delete table ip lanseal_gw
+table ip lanseal_gw {
+  chain input {
+    type filter hook input priority 0; policy drop;
+    ct state invalid drop
+    ct state established,related accept
+    iifname "lo" accept
+    udp sport 67 udp dport 68 accept
+    # Control plane + IKE data plane, from the protected LAN only
+    ip saddr @PROTECTED@ udp dport { 500, 4500 } accept
+    ip saddr @PROTECTED@ ip protocol esp accept
+    ip saddr @PROTECTED@ tcp dport @CA_PORT@ accept
+    ip saddr @PROTECTED@ tcp dport { @ADMIN_PORTS@ } accept
+    ip saddr @PROTECTED@ icmp type echo-request limit rate 10/second accept
+    # Services offered inside the overlay: only for packets that arrived through IPsec
+    ip saddr @OVERLAY@ ip daddr @GW_OV@ meta ipsec exists udp dport 53 accept
+    ip saddr @OVERLAY@ ip daddr @GW_OV@ meta ipsec exists tcp dport 53 accept
+    ip saddr @OVERLAY@ ip daddr @GW_OV@ meta ipsec exists icmp type echo-request accept
+  }
+  chain forward {
+    type filter hook forward priority 0; policy drop;
+    # Hub-and-spoke: enrolled device -> gateway -> enrolled device. Nothing else is forwarded (no LAN/internet).
+    ip saddr @OVERLAY@ ip daddr @OVERLAY@ meta ipsec exists accept
+  }
+}

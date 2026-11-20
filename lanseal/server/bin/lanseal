@@ -1,0 +1,158 @@
+#!/usr/bin/env bash
+# lanseal - gateway management CLI (interim Bash implementation).
+# Implemented: status, devices, enroll, revoke, set-serial, logs.
+# Not yet implemented (later phases): renew, routes, firewall, test, backup, restore.
+set -Eeuo pipefail
+LANSEAL_LIB="${LANSEAL_LIB:-/usr/local/lib/lanseal}"
+# shellcheck source=/dev/null
+source "$LANSEAL_LIB/common.sh"
+need_root
+export STEPPATH=/etc/step-ca
+REG() { python3 "$LANSEAL_LIB/registry.py" "$@"; }
+CA_PORT="$(cfg pki.ca_port)"; ROOT=/etc/step-ca/certs/root_ca.crt; PW=/etc/step-ca/secrets/password.txt
+DOMAIN="$(cfg dns.domain)"; GW_FQDN="$(cfg server.dns_name)"; GW_OV="$(cfg network.gateway_overlay_address)"
+OVERLAY="$(cfg network.overlay_subnet)"; LAN_IP="$(cfg server.lan_address)"
+PROTECTED_CSV="$(cfg network.protected_subnets | paste -sd, -)"
+CONFD=/etc/swanctl/conf.d
+
+device_conf() { # device_conf NAME ADDR
+  local n="$1" a="$2" ike esp
+  ike="$(cfg ipsec.ike_proposals | paste -sd, -)"; esp="$(cfg ipsec.esp_proposals | paste -sd, -)"
+  install_file_from_stdin "$CONFD/dev-$n.conf" 0644 <<CONF
+# Managed by LANSeal for device '$n'. Removed by 'lanseal revoke'.
+connections {
+  lanseal-$n {
+    version = 2
+    mobike = yes
+    fragmentation = yes
+    proposals = $ike
+    local_addrs = $LAN_IP
+    pools = pool-$n
+    dpd_delay = $(cfg ipsec.dpd_delay)
+    rekey_time = $(cfg ipsec.ike_rekey_time)
+    local {
+      auth = pubkey
+      certs = lanseal-gateway.pem
+      id = $GW_FQDN
+    }
+    remote {
+      auth = pubkey
+      id = $n.$DOMAIN
+    }
+    children {
+      lanseal {
+        # Whole overlay on the gateway side => enrolled peers can be reached *through* the gateway (hairpin).
+        local_ts = $OVERLAY
+        mode = tunnel
+        esp_proposals = $esp
+        rekey_time = $(cfg ipsec.child_rekey_time)
+        dpd_action = clear
+      }
+    }
+  }
+}
+pools {
+  pool-$n {
+    addrs = $a-$a
+  }
+}
+CONF
+}
+
+regen_hosts() {
+  REG hosts "$GW_FQDN" "$GW_OV" "$DOMAIN" | install_file_from_stdin "$LANSEAL_VAR/hosts" 0644
+  systemctl reload dnsmasq 2>/dev/null || systemctl restart dnsmasq
+}
+
+cmd_enroll() {
+  local n="${1:-}" p="${2:-}"
+  [ -n "$n" ] && [ -n "$p" ] || die "usage: lanseal enroll <name> <linux|windows|android>"
+  valid_device_name "$n" || die "device name must be lower-case letters, digits and '-' (max 30)"
+  local fqdn="$n.$DOMAIN" tok fp
+  tok="$(step ca token "$fqdn" --san "$fqdn" --provisioner lanseal-enroll --provisioner-password-file "$PW" \
+        --not-after "$(cfg pki.enrollment_token_ttl)" --ca-url "https://127.0.0.1:$CA_PORT" --root "$ROOT")"
+  fp="$(step certificate fingerprint "$ROOT")"
+  local addr; addr="$(REG add "$n" "$p" "$OVERLAY" "$(cfg network.device_pool_start)" "$GW_OV")"
+  device_conf "$n" "$addr"
+  swanctl --load-all >/dev/null || { rm -f "$CONFD/dev-$n.conf"; REG revoke "$n"; die "swanctl rejected the device config; enrollment rolled back"; }
+  regen_hosts
+  if [ "$p" = "linux" ]; then
+    cat <<OUT
+
+Device '$n' authorised: overlay address $addr, identity $fqdn
+The one-time token below expires after $(cfg pki.enrollment_token_ttl) and can be used once.
+
+Linux client (run as root on the device, from a checkout of this repo):
+  ./clients/linux/install.sh --gateway $LAN_IP --ca-port $CA_PORT --fingerprint $fp \\
+      --gateway-name $GW_FQDN --overlay $OVERLAY --protected $(cfg network.protected_subnets | paste -sd, -) \\
+      --name $n --token '$tok'
+
+OUT
+  fi
+
+  if [ "$p" = "windows" ]; then
+    cat <<WIN
+Windows 11 client (PowerShell as Administrator; requires step.exe and openssl.exe on PATH):
+  .\clients\windows\Enroll-LANSealClient.ps1 -GatewayIP $LAN_IP -GatewayName $GW_FQDN -GatewayOverlay '$GW_OV' -CaPort $CA_PORT -Fingerprint $fp -Name $n -Token '$tok' -Overlay '$OVERLAY' -Protected '$PROTECTED_CSV'
+
+WIN
+  elif [ "$p" = "android" ]; then
+    warn "Android enrollment is not implemented yet; device '$n' was allocated at $addr. Revoke it with: lanseal revoke $n"
+  fi
+}
+
+cmd_revoke() {
+  local n="${1:-}"; [ -n "$n" ] || die "usage: lanseal revoke <name> [--serial <hex>]"
+  shift || true
+  local serial=""; [ "${1:-}" = "--serial" ] && serial="${2:-}"
+  [ -n "$(REG get "$n")" ] || die "unknown device '$n'"
+  [ -z "$serial" ] || REG set-serial "$n" "$serial"
+  serial="$(REG get "$n" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("serial",""))')"
+  swanctl --terminate --ike "lanseal-$n" >/dev/null 2>&1 || true   # immediate cut-off
+  if [ -e "$CONFD/dev-$n.conf" ]; then backup_file "$CONFD/dev-$n.conf"; rm -f "$CONFD/dev-$n.conf"; fi
+  swanctl --load-all >/dev/null
+  REG revoke "$n"
+  regen_hosts
+  info "gateway no longer accepts identity $n.$DOMAIN (effective immediately)"
+  if [ -n "$serial" ]; then
+    local tok; tok="$(step ca token --revoke "$serial" --provisioner lanseal-admin --provisioner-password-file "$PW" \
+        --ca-url "https://127.0.0.1:$CA_PORT" --root "$ROOT")"
+    step ca revoke --token "$tok" --ca-url "https://127.0.0.1:$CA_PORT" --root "$ROOT" "$serial" \
+      && info "certificate $serial revoked at the CA (passive: renewal is now refused)"
+  else
+    warn "no certificate serial recorded: CA-side revocation skipped. Run: lanseal revoke $n --serial <hex>"
+  fi
+  info "NOTE: the gateway-side identity removal is the enforcement; CA revocation is passive (blocks renewal) and CRL checking is not yet wired up."
+}
+
+cmd_devices() {
+  local sas; sas="$(swanctl --list-sas 2>/dev/null || true)"
+  SAS="$sas" REG list | python3 "$LANSEAL_LIB/devices_table.py"
+}
+
+cmd_status() {
+  for s in step-ca strongswan dnsmasq lanseal-overlay; do
+    printf '%-18s %s\n' "$s" "$(systemctl is-active "$s" 2>/dev/null || true)"
+  done
+  # lanseal-firewall is oneshot; check if nft table exists
+  if nft list table ip lanseal_gw >/dev/null 2>&1; then
+    fw_status="active (nft loaded)"
+  else
+    fw_status="inactive"
+  fi
+  printf '%-18s %s\n' "lanseal-firewall" "$fw_status"
+  echo "gateway cert expires: $(openssl x509 -enddate -noout -in /etc/swanctl/x509/lanseal-gateway.pem | cut -d= -f2)"
+  echo "ip_forward=$(sysctl -n net.ipv4.ip_forward)"
+  swanctl --list-sas 2>/dev/null | grep -E '^lanseal-|ESTABLISHED|ESP|proposals' || echo "no IKE SAs"
+}
+
+case "${1:-}" in
+  enroll) shift; cmd_enroll "$@";;
+  revoke) shift; cmd_revoke "$@";;
+  devices) cmd_devices;;
+  status) cmd_status;;
+  set-serial) shift; REG set-serial "$@";;
+  logs) shift; exec journalctl -u strongswan -u step-ca -u dnsmasq "${@:--n 100}";;
+  renew|routes|firewall|test|backup|restore) die "'$1' is not implemented yet (scheduled for a later phase)";;
+  *) echo "usage: lanseal {status|devices|enroll|revoke|set-serial|logs}"; exit 2;;
+esac

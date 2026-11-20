@@ -1,0 +1,61 @@
+#!/usr/sbin/nft -f
+# LANSeal Gateway - Hardened
+# CRITICAL: forward chain requires meta ipsec exists for 10.77.0.0/24 traffic
+
+flush ruleset
+
+# ----- NAT -----
+table nat lanseal_gateway {
+    chain postrouting {
+        type nat hook postrouting priority 100; policy accept;
+        # Tunnel clients → physical LAN (masquerade)
+        ip saddr 10.77.0.0/24 ip daddr 10.24.10.0/24 masquerade
+        # Tunnel clients → internet (optional, full tunnel)
+        # ip saddr 10.77.0.0/24 oifname "eth0" masquerade
+    }
+}
+
+# ----- FILTER -----
+table inet lanseal_server {
+    chain input {
+        type filter hook input priority filter - 10; policy drop;
+        ct state established,related accept
+        iifname "lo" accept
+
+        # IKE/ESP from clients (physical LAN)
+        udp dport { 500, 4500 } accept
+        ip protocol esp accept
+
+        # SSH/mgmt from trusted subnets
+        ip saddr { 10.24.10.0/24, 10.77.0.0/24 } tcp dport 22 accept
+
+        # ICMP (rate limited)
+        icmp type { destination-unreachable, time-exceeded, echo-request } limit rate 5/second accept
+
+        # DHCP (if gateway runs DHCP)
+        # udp dport 67 accept
+
+        # Log dropped
+        log prefix "LANSeal-INPUT-DROP: " level info
+    }
+
+    chain forward {
+        type filter hook forward priority filter - 10; policy drop;
+        ct state established,related accept
+
+        # ===== CRITICAL: Only decrypted tunnel traffic may traverse =====
+        # Tunnel clients → physical LAN
+        ip saddr 10.77.0.0/24 ip daddr 10.24.10.0/24 meta ipsec exists accept
+        # Physical LAN → tunnel clients
+        ip saddr 10.24.10.0/24 ip daddr 10.77.0.0/24 meta ipsec exists accept
+
+        # Tunnel client ↔ tunnel client (hairpin via gateway) - optional
+        # ip saddr 10.77.0.0/24 ip daddr 10.77.0.0/24 meta ipsec exists accept
+
+        log prefix "LANSeal-FWD-DROP: " level info
+    }
+
+    chain output {
+        type filter hook output priority filter - 10; policy accept;
+    }
+}
